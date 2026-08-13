@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Stack</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    canvas { display: block; }
+
+    .screen {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 32px;
+      z-index: 10;
+    }
+
+    .screen.hidden { display: none; }
+
+    .score-display {
+      color: #fff;
+      font-size: 5em;
+      font-weight: 700;
+      letter-spacing: -2px;
+      line-height: 1;
+    }
+
+    .label {
+      color: rgba(255,255,255,0.45);
+      font-size: 0.85em;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: -20px;
+    }
+
+    .btn {
+      background: #fff;
+      color: #000;
+      border: none;
+      border-radius: 50px;
+      padding: 16px 44px;
+      font-size: 1em;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      touch-action: manipulation;
+      min-height: 54px;
+      transition: transform 0.1s, opacity 0.1s;
+    }
+
+    .btn:active { transform: scale(0.94); opacity: 0.85; }
+
+    #score {
+      position: fixed;
+      top: 28px;
+      right: 24px;
+      color: #fff;
+      font-size: clamp(1.8em, 7vw, 2.8em);
+      font-weight: 700;
+      z-index: 5;
+      pointer-events: none;
+    }
+
+    #tap-zone {
+      position: fixed;
+      inset: 0;
+      z-index: 4;
+      touch-action: manipulation;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="start-screen" class="screen">
+    <button class="btn" id="play-btn">Play</button>
+  </div>
+
+  <div id="end-screen" class="screen hidden">
+    <div class="label">Score</div>
+    <div class="score-display" id="final-score">0</div>
+    <button class="btn" id="play-again-btn">Play again</button>
+  </div>
+
+  <div id="score" style="display:none">0</div>
+  <div id="tap-zone"></div>
+
+  <script src='https://cdnjs.cloudflare.com/ajax/libs/three.js/r124/three.min.js'></script>
+  <script src='https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js'></script>
+  <script>
+    let camera, scene, renderer;
+    let world, lastTime, stack, overhangs;
+    const boxHeight = 1;
+    const originalBoxSize = 3;
+    let autopilot, gameEnded, robotPrecision;
+
+    const scoreEl = document.getElementById("score");
+    const finalScoreEl = document.getElementById("final-score");
+    const startScreen = document.getElementById("start-screen");
+    const endScreen = document.getElementById("end-screen");
+    const tapZone = document.getElementById("tap-zone");
+
+    init();
+
+    function setRobotPrecision() {
+      robotPrecision = Math.random() * 1 - 0.5;
+    }
+
+    function init() {
+      autopilot = true;
+      gameEnded = false;
+      lastTime = 0;
+      stack = [];
+      overhangs = [];
+      setRobotPrecision();
+
+      world = new CANNON.World();
+      world.gravity.set(0, -10, 0);
+      world.broadphase = new CANNON.NaiveBroadphase();
+      world.solver.iterations = 40;
+
+      const aspect = window.innerWidth / window.innerHeight;
+      const width = 10;
+      const height = width / aspect;
+
+      camera = new THREE.OrthographicCamera(width / -2, width / 2, height / 2, height / -2, 0, 100);
+      camera.position.set(4, 4, 4);
+      camera.lookAt(0, 0, 0);
+
+      scene = new THREE.Scene();
+      addLayer(0, 0, originalBoxSize, originalBoxSize);
+      addLayer(-10, 0, originalBoxSize, originalBoxSize, "x");
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+      dirLight.position.set(10, 20, 0);
+      scene.add(dirLight);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setAnimationLoop(animation);
+      document.body.appendChild(renderer.domElement);
+    }
+
+    function startGame() {
+      autopilot = false;
+      gameEnded = false;
+      lastTime = 0;
+      stack = [];
+      overhangs = [];
+
+      startScreen.classList.add("hidden");
+      endScreen.classList.add("hidden");
+      scoreEl.style.display = "block";
+      scoreEl.innerText = 0;
+
+      while (world.bodies.length > 0) world.remove(world.bodies[0]);
+      while (scene.children.find(c => c.type == "Mesh")) {
+        scene.remove(scene.children.find(c => c.type == "Mesh"));
+      }
+
+      addLayer(0, 0, originalBoxSize, originalBoxSize);
+      addLayer(-10, 0, originalBoxSize, originalBoxSize, "x");
+      camera.position.set(4, 4, 4);
+      camera.lookAt(0, 0, 0);
+    }
+
+    function addLayer(x, z, width, depth, direction) {
+      const y = boxHeight * stack.length;
+      const layer = generateBox(x, y, z, width, depth, false);
+      layer.direction = direction;
+      stack.push(layer);
+    }
+
+    function addOverhang(x, z, width, depth) {
+      const y = boxHeight * (stack.length - 1);
+      overhangs.push(generateBox(x, y, z, width, depth, true));
+    }
+
+    function generateBox(x, y, z, width, depth, falls) {
+      const geometry = new THREE.BoxGeometry(width, boxHeight, depth);
+      const color = new THREE.Color(`hsl(${30 + stack.length * 4}, 100%, 50%)`);
+      const material = new THREE.MeshLambertMaterial({ color });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(x, y, z);
+      scene.add(mesh);
+
+      const shape = new CANNON.Box(new CANNON.Vec3(width / 2, boxHeight / 2, depth / 2));
+      let mass = falls ? 5 : 0;
+      mass *= (width / originalBoxSize) * (depth / originalBoxSize);
+      const body = new CANNON.Body({ mass, shape });
+      body.position.set(x, y, z);
+      world.addBody(body);
+
+      return { threejs: mesh, cannonjs: body, width, depth };
+    }
+
+    function cutBox(topLayer, overlap, size, delta) {
+      const dir = topLayer.direction;
+      topLayer.width = dir == "x" ? overlap : topLayer.width;
+      topLayer.depth = dir == "z" ? overlap : topLayer.depth;
+      topLayer.threejs.scale[dir] = overlap / size;
+      topLayer.threejs.position[dir] -= delta / 2;
+      topLayer.cannonjs.position[dir] -= delta / 2;
+      const shape = new CANNON.Box(new CANNON.Vec3(topLayer.width / 2, boxHeight / 2, topLayer.depth / 2));
+      topLayer.cannonjs.shapes = [];
+      topLayer.cannonjs.addShape(shape);
+    }
+
+    // Events
+    document.getElementById("play-btn").addEventListener("touchstart", e => { e.preventDefault(); startGame(); }, { passive: false });
+    document.getElementById("play-btn").addEventListener("click", e => { e.stopPropagation(); startGame(); });
+
+    document.getElementById("play-again-btn").addEventListener("touchstart", e => { e.preventDefault(); startGame(); }, { passive: false });
+    document.getElementById("play-again-btn").addEventListener("click", e => { e.stopPropagation(); startGame(); });
+
+    tapZone.addEventListener("touchstart", e => { e.preventDefault(); if (!autopilot) splitBlockAndAddNextOneIfOverlaps(); }, { passive: false });
+    tapZone.addEventListener("mousedown", () => { if (!autopilot) splitBlockAndAddNextOneIfOverlaps(); });
+
+    window.addEventListener("keydown", e => {
+      if (e.key == " ") { e.preventDefault(); if (!autopilot) splitBlockAndAddNextOneIfOverlaps(); }
+      if (e.key == "r" || e.key == "R") { e.preventDefault(); startGame(); }
+    });
+
+    function splitBlockAndAddNextOneIfOverlaps() {
+      if (gameEnded) return;
+      const topLayer = stack[stack.length - 1];
+      const previousLayer = stack[stack.length - 2];
+      const dir = topLayer.direction;
+      const size = dir == "x" ? topLayer.width : topLayer.depth;
+      const delta = topLayer.threejs.position[dir] - previousLayer.threejs.position[dir];
+      const overlap = size - Math.abs(delta);
+
+      if (overlap > 0) {
+        cutBox(topLayer, overlap, size, delta);
+        const shift = (overlap / 2 + Math.abs(delta) / 2) * Math.sign(delta);
+        addOverhang(
+          dir == "x" ? topLayer.threejs.position.x + shift : topLayer.threejs.position.x,
+          dir == "z" ? topLayer.threejs.position.z + shift : topLayer.threejs.position.z,
+          dir == "x" ? Math.abs(delta) : topLayer.width,
+          dir == "z" ? Math.abs(delta) : topLayer.depth
+        );
+        const nextX = dir == "x" ? topLayer.threejs.position.x : -10;
+        const nextZ = dir == "z" ? topLayer.threejs.position.z : -10;
+        scoreEl.innerText = stack.length - 1;
+        addLayer(nextX, nextZ, topLayer.width, topLayer.depth, dir == "x" ? "z" : "x");
+      } else {
+        missedTheSpot();
+      }
+    }
+
+    function missedTheSpot() {
+      const topLayer = stack[stack.length - 1];
+      addOverhang(topLayer.threejs.position.x, topLayer.threejs.position.z, topLayer.width, topLayer.depth);
+      world.remove(topLayer.cannonjs);
+      scene.remove(topLayer.threejs);
+      gameEnded = true;
+      finalScoreEl.innerText = stack.length - 1;
+      scoreEl.style.display = "none";
+      endScreen.classList.remove("hidden");
+    }
+
+    function animation(time) {
+      if (lastTime) {
+        const timePassed = time - lastTime;
+        const speed = 0.008;
+        const topLayer = stack[stack.length - 1];
+        const previousLayer = stack[stack.length - 2];
+
+        const shouldMove = !gameEnded && (!autopilot || topLayer.threejs.position[topLayer.direction] < previousLayer.threejs.position[topLayer.direction] + robotPrecision);
+
+        if (shouldMove) {
+          topLayer.threejs.position[topLayer.direction] += speed * timePassed;
+          topLayer.cannonjs.position[topLayer.direction] += speed * timePassed;
+          if (topLayer.threejs.position[topLayer.direction] > 10) missedTheSpot();
+        } else if (autopilot) {
+          splitBlockAndAddNextOneIfOverlaps();
+          setRobotPrecision();
+        }
+
+        if (camera.position.y < boxHeight * (stack.length - 2) + 4) camera.position.y += speed * timePassed;
+        world.step(timePassed / 1000);
+        overhangs.forEach(e => { e.threejs.position.copy(e.cannonjs.position); e.threejs.quaternion.copy(e.cannonjs.quaternion); });
+        renderer.render(scene, camera);
+      }
+      lastTime = time;
+    }
+
+    window.addEventListener("resize", () => {
+      const aspect = window.innerWidth / window.innerHeight;
+      const width = 10;
+      const height = width / aspect;
+      camera.top = height / 2;
+      camera.bottom = height / -2;
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.render(scene, camera);
+    });
+
+    document.addEventListener("touchmove", e => e.preventDefault(), { passive: false });
+    document.addEventListener("contextmenu", e => e.preventDefault());
+  </script>
+</body>
+</html>
